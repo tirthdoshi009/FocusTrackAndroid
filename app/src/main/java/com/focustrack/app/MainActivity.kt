@@ -1,12 +1,16 @@
 package com.focustrack.app
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -86,9 +90,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.focustrack.app.data.CategoryKind
 import com.focustrack.app.data.themedColor
+import com.focustrack.app.notify.DailySummaryWorker
 import com.focustrack.app.ui.theme.FocusTrackTheme
 import com.focustrack.app.usage.AppUsage
 import com.focustrack.app.usage.DailySummary
@@ -107,9 +113,14 @@ class MainActivity : ComponentActivity() {
         MainViewModel.Factory(applicationContext)
     }
 
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        DailySummaryWorker.schedule(applicationContext)
+        maybeRequestNotificationPermission()
         setContent {
             FocusTrackTheme {
                 Surface(
@@ -137,6 +148,15 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refresh()
+    }
+
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 }
 
@@ -270,6 +290,10 @@ private fun TodayScreen(
                 onCategorize = { scope.launch { listState.animateScrollToItem(3) } },
             )
         }
+        val topRisky = summary.apps.firstOrNull { it.kind == CategoryKind.RISKY }
+        if (topRisky != null) {
+            item { InsightCard(topRisky, summary.msByKind[CategoryKind.RISKY] ?: 0L) }
+        }
         item { KindLegend(summary) }
         item {
             Column(modifier = Modifier.padding(top = 12.dp)) {
@@ -319,9 +343,15 @@ private fun TodayScreen(
 @Composable
 private fun ScoreCard(summary: DailySummary, onInfo: () -> Unit, onCategorize: () -> Unit) {
     val onContainer = MaterialTheme.colorScheme.onPrimaryContainer
+    val coverage = if (summary.totalMs > 0L) {
+        summary.categorizedMs.toFloat() / summary.totalMs
+    } else {
+        0f
+    }
     val status = when {
         !summary.hasUsage -> "No usage data"
         !summary.hasScore -> "Not scored yet"
+        coverage < 0.5f -> "Low confidence"
         else -> scoreLabel(summary.focusScore)
     }
     ElevatedCard(
@@ -548,6 +578,46 @@ private fun ScoreRuleRow(kind: CategoryKind, rule: String) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun InsightCard(topRisky: AppUsage, riskyTotalMs: Long) {
+    val pct = if (riskyTotalMs > 0L) (100f * topRisky.totalMs / riskyTotalMs).roundToInt() else 0
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppIcon(topRisky)
+            Spacer(Modifier.size(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Top distraction today",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    topRisky.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    "${formatDuration(topRisky.totalMs)} \u00B7 $pct% of distracting time",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CategoryKind.RISKY.themedColor(),
+                )
+            }
+        }
     }
 }
 

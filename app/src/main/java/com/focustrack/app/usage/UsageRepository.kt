@@ -62,6 +62,20 @@ class UsageRepository(private val context: Context) {
 
     private val overrides = CategoryOverrides(context)
     private val dao = FocusTrackDatabase.get(context).dailyStatDao()
+    private val ownPackage = context.packageName
+    private val trackableCache = HashMap<String, Boolean>()
+
+    /**
+     * Whether a package represents meaningful user-facing usage. Excludes this
+     * app itself and non-launchable packages (system UI, launchers, keyboards,
+     * background services) which shouldn't count toward "your app usage".
+     */
+    private fun isTrackable(pm: android.content.pm.PackageManager, pkg: String): Boolean {
+        if (pkg == ownPackage) return false
+        return trackableCache.getOrPut(pkg) {
+            pm.getLaunchIntentForPackage(pkg) != null
+        }
+    }
 
     fun getTodaySummary(): DailySummary {
         val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
@@ -73,7 +87,7 @@ class UsageRepository(private val context: Context) {
         if (durations.isEmpty()) return DailySummary.EMPTY
 
         val apps = durations
-            .filter { it.value > 0L }
+            .filter { it.value > 0L && isTrackable(pm, it.key) }
             .map { (pkg, ms) ->
                 val cat = AppCategories.categoryFor(pkg)
                 val override = overrides.kindFor(pkg)
@@ -195,11 +209,12 @@ class UsageRepository(private val context: Context) {
         val start = date.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = minOf(date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(), now)
         val durations = aggregateForegroundMs(usm, start, end)
+        val pm = context.packageManager
 
         val msByKind = HashMap<CategoryKind, Long>()
         var total = 0L
         for ((pkg, ms) in durations) {
-            if (ms <= 0L) continue
+            if (ms <= 0L || !isTrackable(pm, pkg)) continue
             val kind = overrides.kindFor(pkg) ?: AppCategories.kindFor(pkg)
             msByKind[kind] = (msByKind[kind] ?: 0L) + ms
             total += ms
